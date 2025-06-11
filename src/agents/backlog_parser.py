@@ -95,23 +95,18 @@ backlog_chain = prompt | llm | parser
 
 def parse_backlog_item(backlog_item: str) -> dict | str:
     try:
-        # Run LangChain pipeline to parse the backlog item
         parsed_output = backlog_chain.invoke({"backlog_item": backlog_item})
 
-        # Extract columns from transformations and business rules for validation
         columns_to_validate = []
         for item in parsed_output["transformation"] + parsed_output["business_rules"]:
-            # Use regex to find potential column names (e.g., AMT_CREDIT, SK_ID_CURR)
             matches = re.findall(r"\b[A-Z_]+\b", item)
             columns_to_validate.extend(matches)
 
-        # Validate source tables
         for table in parsed_output["source"]:
             file_path = f"data/raw/{table}.csv"
             if not os.path.exists(file_path):
                 return f"File {table}.csv not found"
 
-        # Validate columns across all source tables
         for column in set(columns_to_validate):
             column_valid = False
             for table in parsed_output["source"]:
@@ -126,17 +121,3 @@ def parse_backlog_item(backlog_item: str) -> dict | str:
 
     except Exception as e:
         return str(e)
-
-
-# Example usage
-# input_data = """
-# Extract applicant data from application_train and bureau tables in the Home Credit dataset.
-# Join the tables on SK_ID_CURR using an inner join.
-# Filter for applicants with AMT_INCOME_TOTAL greater than 50000.
-# Calculate the average AMT_CREDIT per applicant. Apply a business rule to exclude
-# applicants under 18 years old and calculate a debt-to-income ratio as AMT_CREDIT
-# divided by AMT_INCOME_TOTAL.
-# """
-
-# parser_result = parse_backlog_item(input_data)
-# print(parser_result)
