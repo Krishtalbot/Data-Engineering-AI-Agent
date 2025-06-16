@@ -47,7 +47,6 @@ class BusinessRule(BaseModel):
 
 
 class OutputRequirement(BaseModel):
-    """Defines a single requirement for the final output."""
 
     type: str = Field(
         ...,
