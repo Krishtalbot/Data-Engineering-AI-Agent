@@ -13,7 +13,19 @@ generated_code = []
 llm_config = None
 
 
-# Modified generate_etl_code to accept parsed_result directly
+load_dotenv()
+logging.basicConfig(level=logging.INFO)  # Ensure logging is configured
+
+# --- Configuration for your ETL Pinecone Index ---
+# Define the Pinecone index name specifically for ETL generated data
+# You can change 'etl-generated-data' to any name you prefer for this specific data.
+etl_pinecone_index_name = "user-input"
+etl_pinecone_manager = None  # Initialize as None
+pc_api = os.getenv("PINECONE_API_KEY")
+pc_client = Pinecone(api_key=pc_api)
+etl_pinecone_manager = PineconeManager(etl_pinecone_index_name)
+
+
 def generate_etl_code(parsed_backlog_dict: dict, original_backlog_item_str: str):
     global generated_code
     generated_code.clear()
@@ -221,23 +233,29 @@ def main():
     user_consent = reviewer.last_message()["content"].strip().lower()
 
     if user_consent in ["yes", "y"]:
-        try:
-            message = store_data(
-                DataInput(
-                    text=f"problem_type::{backlog_item_str} => {json.dumps(parsed_json_output, indent=2)}",
-                    metadata={"source": "autogen_parsed_etl"},
+        if etl_pinecone_manager:  # Check if the manager was successfully initialized
+            try:
+                # backlog_item_str and parsed_json_output are assumed to be defined earlier
+                # json.dumps converts the dict to a string for storage in Pinecone's text field
+                message = etl_pinecone_manager.store_data(
+                    DataInput(
+                        text=f"problem_type::{backlog_item_str} => {json.dumps(parsed_json_output, indent=2)}",
+                        metadata={
+                            "source": "autogen_parsed_etl",
+                            "backlog_item": backlog_item_str,
+                        },  # Add more relevant metadata here
+                    )
                 )
-            )
-            if message:
-                print(f"Stored parsed result in Pinecone: {message}")
-            else:
-                print("Failed to store the parsed result in Pinecone.")
-        except NameError:
+                if message:
+                    print(f"Stored parsed result in Pinecone: {message}")
+                else:
+                    print("Failed to store the parsed result in Pinecone.")
+            except Exception as e:  # Catch any exceptions during the storage call
+                print(f"Error storing data to Pinecone using ETL manager: {e}")
+        else:
             print(
-                "Warning: store_data or DataInput not found. Skipping data storage to Pinecone."
+                "Skipping data storage to Pinecone: ETL Pinecone Manager not initialized due to previous errors."
             )
-        except Exception as e:
-            print(f"Error storing data to Pinecone: {e}")
     else:
         print("Parsed data not stored in Pinecone as per user's choice.")
 

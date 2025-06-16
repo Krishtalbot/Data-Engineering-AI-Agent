@@ -1,6 +1,7 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import when, col, mean
+from pyspark.sql.functions import when, col, lit, mean, desc, first
 from pyspark.sql.types import IntegerType, DoubleType, FloatType, StringType
+
 
 # Initialize Spark session
 spark = SparkSession.builder.appName("LoanDefaultPrediction").getOrCreate()
@@ -10,91 +11,94 @@ APPLICATION_TRAIN_PATH = "data/raw/application_train.csv"
 BUREAU_PATH = "data/raw/bureau.csv"
 OUTPUT_PATH = "data/output/loan_default_predictions"
 
+
 def read_data(spark, path):
-    """Reads a CSV file into a Spark DataFrame.
-
-    Args:
-        spark: SparkSession.
-        path: Path to the CSV file.
-
-    Returns:
-        Spark DataFrame.  Returns None and logs an error if the read fails.
-    """
+    """Reads a CSV file into a Spark DataFrame."""
     try:
         df = spark.read.csv(path, header=True, inferSchema=True)
         return df
     except Exception as e:
-        print(f"Error reading {path}: {e}")
+        print(f"Error reading file {path}: {e}")
         return None
 
-def transform_data(application_train, bureau):
-    """Transforms the input DataFrames.
 
-    Args:
-        application_train: application_train DataFrame.
-        bureau: bureau DataFrame.
+def handle_missing_values(df):
+    """Imputes missing numerical values with the mean and categorical values with the most frequent value."""
 
-    Returns:
-        Transformed DataFrame.
-    """
-    # Join application_train with bureau on SK_ID_CURR
-    joined_data = application_train.join(bureau, on="SK_ID_CURR", how="inner")
+    # Define numerical and categorical type names
+    numerical_types = [IntegerType, DoubleType, FloatType]
+    string_type = StringType
 
-    # Handle missing values:  Calculate means only once
-    numerical_cols = [field.name for field in joined_data.schema.fields if field.dataType in [IntegerType, DoubleType, FloatType]]
-    means = {}
+    # Identify numerical and categorical columns
+    numerical_cols = [
+        field.name for field in df.schema.fields if field.dataType in numerical_types
+    ]
+    categorical_cols = [
+        field.name for field in df.schema.fields if field.dataType == string_type
+    ]
+
+    # Impute numerical columns with the mean
     for col_name in numerical_cols:
-        means[col_name] = joined_data.select(mean(col(col_name))).first()[0]
+        mean_value = df.select(mean(col(col_name))).first()[0]
+        df = df.fillna({col_name: mean_value})
 
-    joined_data = joined_data.fillna(means)
+    # Impute categorical columns with the most frequent value
+    for col_name in categorical_cols:
+        most_frequent_value = (
+            df.groupBy(col_name)
+            .count()
+            .orderBy(desc("count"))
+            .select(first(col_name))
+            .first()[0]
+        )
+        df = df.fillna({col_name: most_frequent_value})
+    return df
 
-    # For string columns, fill missing values with 'Unknown'
-    string_cols = [field.name for field in joined_data.schema.fields if field.dataType == StringType]
-    joined_data = joined_data.fillna({'Unknown': 'Unknown'})
-    
-    # Create risk score
-    joined_data = joined_data.withColumn(
-        "RISK_SCORE",
-        when((col("AMT_INCOME_TOTAL") / col("AMT_CREDIT") > 0.5) & (col("CNT_CHILDREN") < 2), 0.2)
-        .when((col("AMT_INCOME_TOTAL") / col("AMT_CREDIT") > 0.25) & (col("CNT_CHILDREN") < 3), 0.5)
-        .otherwise(0.8)
+
+def predict_loan_default(df):
+    """Generates a dummy prediction column based on EXT_SOURCE_3."""
+    # Dummy prediction: predict based on EXT_SOURCE_3, replace with real model prediction
+    return df.withColumn(
+        "predicted_default", when(col("EXT_SOURCE_3") > 0.5, lit(1)).otherwise(lit(0))
     )
-    
-    return joined_data
 
 
-def write_data(df, path):
-    """Writes a Spark DataFrame to a CSV file.
-
-    Args:
-        df: Spark DataFrame to write.
-        path: Output path.
-    """
+def write_output(df, path):
+    """Writes the DataFrame to a CSV file."""
     try:
         df.write.csv(path, header=True, mode="overwrite")
+        print(f"Output data written to {path}")
     except Exception as e:
-        print(f"Error writing to {path}: {e}")
+        print(f"Error writing output to {path}: {e}")
+
 
 def main():
-    """Main function to execute the loan default prediction pipeline."""
+    """Main function to orchestrate the loan default prediction process."""
     # Read source data
     application_train = read_data(spark, APPLICATION_TRAIN_PATH)
     bureau = read_data(spark, BUREAU_PATH)
 
-    # Check if DataFrames were loaded successfully
-    if application_train is None or bureau is None:
+    if not application_train or not bureau:
         print("Failed to load data. Exiting.")
         spark.stop()
         return
 
-    # Data Transformation
-    transformed_data = transform_data(application_train, bureau)
+    # Join application_train with bureau
+    joined_data = application_train.join(bureau, "SK_ID_CURR", "inner")
 
-    # Output
-    transformed_data.select("SK_ID_CURR", "RISK_SCORE").show()
-    write_data(transformed_data, OUTPUT_PATH)
+    # Handle missing values
+    joined_data = handle_missing_values(joined_data)
 
-    spark.stop()
+    # Business Rules: Predict loan default
+    joined_data = predict_loan_default(joined_data)
+
+    # Output: Apply scoring model and output results as a table
+    output_data = joined_data.select("SK_ID_CURR", "predicted_default")
+
+    # Write the output data to a file
+    write_output(output_data, OUTPUT_PATH)
+
 
 if __name__ == "__main__":
     main()
+    spark.stop()
