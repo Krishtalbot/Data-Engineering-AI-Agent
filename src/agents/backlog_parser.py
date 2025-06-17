@@ -20,16 +20,66 @@ class Source(BaseModel):
     )
 
 
-class TransformationStep(BaseModel):
-    """Defines a single ETL transformation operation."""
+class DataQualityCheck(BaseModel):
+    expectation_type: str = Field(
+        ...,
+        description="The Great Expectations expectation type (e.g., 'expect_column_values_to_not_be_null')",
+    )
+    column: Optional[str] = Field(
+        None, description="The name of the column this expectation applies to."
+    )
+    # Use Optional and any for flexible kwargs that match GE expectations
+    kwargs: Optional[dict] = Field(
+        None,
+        description="Dictionary of keyword arguments for the expectation (e.g., {'min_value': 0, 'max_value': 100}).",
+    )
+    severity: Literal["CRITICAL", "WARNING"] = Field(
+        "CRITICAL",
+        description="Severity of the check: 'CRITICAL' (pipeline halts) or 'WARNING' (alerts, but pipeline continues).",
+    )
+    description: Optional[str] = Field(
+        None, description="A human-readable description of this data quality check."
+    )
 
+
+# New: Define a model for detailed transformation operations
+class TransformationOperation(BaseModel):
+    operation: str = Field(
+        ...,
+        description="Specific operation within a transformation (e.g., 'impute_mean', 'filter_rows', 'rename_column')",
+    )
+    columns: Optional[List[str]] = Field(
+        None, description="List of columns affected by this operation."
+    )
+    data_type: Optional[str] = Field(
+        None,
+        description="Expected data type after transformation (e.g., 'numeric', 'categorical', 'date').",
+    )
+    details: Optional[str] = Field(
+        None, description="More specific details about this operation."
+    )
+
+
+class TransformationStep(BaseModel):
     type: str = Field(
         ...,
         description="Type of transformation (e.g., 'join', 'filter', 'aggregation', 'column_manipulation')",
     )
     details: str = Field(
         ...,
-        description="Detailed description of the transformation operation (e.g., 'join application_train with bureau on SK_ID_CURR', 'filter AMT_INCOME_TOTAL > 50000')",
+        description="High-level detailed description of the transformation operation (e.g., 'join application_train with bureau on SK_ID_CURR', 'handle missing values in all columns').",
+    )
+    output_table_name: Optional[str] = Field(
+        None,
+        description="Suggested name for the PySpark DataFrame after this transformation (e.g., 'joined_df', 'cleaned_data').",
+    )
+    transformations_details: Optional[List[TransformationOperation]] = Field(
+        None,
+        description="A list of granular operations within this transformation step, with specific columns and types.",
+    )
+    data_quality_checks: Optional[List[DataQualityCheck]] = Field(
+        None,
+        description="List of Great Expectations checks to apply after this transformation step.",
     )
 
 
@@ -47,14 +97,25 @@ class BusinessRule(BaseModel):
 
 
 class OutputRequirement(BaseModel):
-
     type: str = Field(
         ...,
         description="Type of output requirement (e.g., 'scoring_model', 'format', 'metadata')",
     )
     details: str = Field(
         ...,
-        description="Detailed description of the output requirement (e.g., 'apply scoring model for loan repayment likelihood with score range 0-100', 'output results as a table')",
+        description="Detailed description of the output requirement (e.g., 'apply scoring model for loan repayment likelihood with score range 0-100', 'output results as a table').",
+    )
+    input_table_name: Optional[str] = Field(
+        None,
+        description="Name of the PySpark DataFrame that serves as input for this output step.",
+    )
+    output_table_name: Optional[str] = Field(
+        None,
+        description="Suggested name for the final PySpark DataFrame or destination after this output step (e.g., 'scored_data').",
+    )
+    data_quality_checks: Optional[List[DataQualityCheck]] = Field(
+        None,
+        description="List of Great Expectations checks to apply to the output of this step.",
     )
 
 
@@ -75,6 +136,10 @@ class BacklogItem(BaseModel):
     )
     output: List[OutputRequirement] = Field(
         description="List of output requirements (e.g., 'apply scoring model for loan repayment likelihood 0-100', 'include confidence scores')."
+    )
+    global_data_quality_checks: Optional[List[DataQualityCheck]] = Field(
+        None,
+        description="List of Great Expectations checks that apply to the overall final dataset.",
     )
 
 
@@ -105,53 +170,61 @@ llm = ChatGoogleGenerativeAI(
 prompt = PromptTemplate(
     input_variables=["backlog_item"],
     template="""
-You are a data engineering assistant tasked with parsing complex backlog items into structured JSON for data engineering tasks using the Home Credit dataset. Your goal is to accurately extract and categorize components from the backlog item into a JSON object with the keys: "source", "transformation", "business_rules", and "output". Each of these keys should contain a list of objects, following the detailed schema provided below.
+You are a highly detailed and intelligent data engineering assistant. Your primary goal is to parse complex natural language backlog items into an extremely precise, structured JSON format for automated data engineering tasks. You must infer as much detail as possible, especially regarding data quality expectations and specific transformation operations.
 
-Follow these instructions for each section:
+**Home Credit Dataset Context:** Assume you are working with the Home Credit loan dataset, which includes tables like `application_train`, `bureau`, `previous_application`, etc., and common columns such as `SK_ID_CURR`, `AMT_INCOME_TOTAL`, `AMT_CREDIT`, `DAYS_BIRTH`, `NAME_CONTRACT_TYPE`, `TARGET`, `LOAN_REPAYMENT_SCORE`. Use this context to make intelligent inferences when details are not explicitly stated.
+
+**JSON Schema Requirements:**
+Generate a JSON object with the following top-level keys: "source", "transformation", "business_rules", "output", and "global_data_quality_checks". Each should contain a list of objects, structured as follows:
 
 1.  **Source**:
-    * Identify all files, tables, or databases mentioned in the backlog item (e.g., 'application_train', 'bureau').
-    * Remove file extensions (e.g., use 'application_train' instead of 'application_train.csv').
-    * If no sources are explicitly mentioned, infer likely tables from the Home Credit dataset based on context (e.g., 'applicant data' implies 'application_train').
-    * Format each source as an object with a "name" key (string) and an optional "description" key (string).
-    * Example: `{{ "name": "application_train", "description": "Main applicant data" }}`
+    * Identify all files, tables, or databases. Remove file extensions.
+    * Infer likely tables from the Home Credit dataset if not explicit (e.g., 'applicant data' implies 'application_train').
+    * Fields: `name` (string), `description` (optional string).
+    * Example: `{{"name": "application_train", "description": "Main applicant data"}}`
 
 2.  **Transformation**:
-    * Extract all processing steps, including joins, filters, aggregations, or column manipulations.
-    * Each step should be formatted as an object with a "type" key (string, e.g., 'join', 'filter', 'aggregation', 'column_manipulation') and a "details" key (string).
-    * The "details" should be a clear, standalone string describing the operation.
-    * Examples:
-        * Join: `{{ "type": "join", "details": "join application_train with bureau on SK_ID_CURR using inner join" }}`
-        * Filter: `{{ "type": "filter", "details": "filter AMT_INCOME_TOTAL > 50000" }}`
-        * Aggregation: `{{ "type": "aggregation", "details": "calculate average AMT_CREDIT per applicant" }}`
-        * Manipulation: `{{ "type": "column_manipulation", "details": "cast AMT_ANNUITY to float" }}`
-    * If transformations are implied but not explicit (e.g., 'combine data' implies a join), specify the most likely operation based on context.
+    * Extract all ETL processing steps.
+    * Fields:
+        * `type` (string, e.g., 'join', 'filter', 'aggregation', 'column_manipulation').
+        * `details` (string): High-level description of the operation.
+        * `output_table_name` (optional string): A logical name for the PySpark DataFrame *after* this transformation (e.g., 'joined_df', 'cleaned_data'). Infer if not given.
+        * `transformations_details` (optional list of objects): For `column_manipulation` types, break down into specific operations.
+            * Each object: `operation` (string, e.g., 'impute_mean', 'filter_rows', 'rename_column'), `columns` (optional list of strings), `data_type` (optional string, infer if possible: 'numeric', 'categorical', 'date'), `details` (optional string).
+            * Example for `handle missing values`: `{{"operation": "impute_mean", "columns": ["AMT_INCOME_TOTAL", "AMT_CREDIT"], "data_type": "numeric", "details": "Impute missing numeric values with column mean."}}`
+        * `data_quality_checks` (optional list of `DataQualityCheck` objects): Great Expectations checks *after* this transformation.
+            * Each `DataQualityCheck` object: `expectation_type` (string, e.g., `expect_column_values_to_not_be_null`), `column` (optional string), `kwargs` (optional dict for parameters like `min_value`, `max_value`, `value_set`, `regex`), `severity` (string: "CRITICAL" or "WARNING"), `description` (optional string).
+            * **Crucial Inference for Data Quality:** Based on the transformation details and Home Credit context, infer common and critical data quality checks.
+                * **Post-Join:** `expect_column_values_to_not_be_null` on join keys, `expect_column_pair_values_to_be_unique`.
+                * **General Numerical/Date Columns:** `expect_column_values_to_be_between`, `expect_column_values_to_match_datetime_format`.
+                * **Categorical Columns:** `expect_column_distinct_values_to_be_in_set`.
+                * **IDs:** `expect_column_values_to_be_unique`.
+                * Use `CRITICAL` for essential checks (e.g., nulls on IDs, out-of-range crucial numerical values) and `WARNING` for less critical but important checks (e.g., unexpected distributions).
 
 3.  **Business Rules**:
-    * Identify domain-specific logic, conditions, or calculations.
-    * Each rule should be formatted as an object with a "type" key (string, e.g., 'condition', 'calculation', 'domain_logic') and a "details" key (string).
-    * The "details" should be a clear string capturing the intent.
-    * Examples:
-        * Condition: `{{ "type": "condition", "details": "exclude applicants under 18 years old" }}`
-        * Calculation: `{{ "type": "calculation", "details": "calculate debt-to-income ratio as AMT_CREDIT / AMT_INCOME_TOTAL" }}`
-        * Domain Logic: `{{ "type": "domain_logic", "details": "flag applicants with more than 3 previous loans as high-risk" }}`
-    * If rules are vague, interpret them based on the Home Credit dataset context (e.g., loan repayment likelihood).
+    * Identify domain-specific logic or conditions.
+    * Fields: `type` (string, e.g., 'condition', 'calculation', 'domain_logic'), `details` (string).
+    * Example: `{{"type": "condition", "details": "exclude applicants under 18 years old"}}`
 
 4.  **Output**:
-    * Extract requirements for the final output, including data format, scoring models, or metadata.
-    * Each requirement should be formatted as an object with a "type" key (string, e.g., 'scoring_model', 'format', 'metadata') and a "details" key (string).
-    * Examples:
-        * Scoring Model: `{{ "type": "scoring_model", "details": "apply scoring model for loan repayment likelihood with score range 0-100" }}`
-        * Metadata: `{{ "type": "metadata", "details": "include confidence scores in metadata" }}`
-        * Format: `{{ "type": "format", "details": "output results as a table in schema scoring_output" }}`
-    * If the output format is not specified, default to `{{ "type": "format", "details": "output results as a table" }}`.
+    * Extract final output requirements.
+    * Fields:
+        * `type` (string, e.g., 'scoring_model', 'format', 'metadata').
+        * `details` (string): High-level description.
+        * `input_table_name` (optional string): Name of the PySpark DataFrame serving as input.
+        * `output_table_name` (optional string): Name for the final output DataFrame/destination.
+        * `data_quality_checks` (optional list of `DataQualityCheck` objects): GE checks *on the final output*.
+            * **For Scoring Models:** Always include `expect_column_values_to_be_between` for the score (0-100), and `expect_column_values_to_be_of_type`. Consider `expect_column_proportion_of_values_to_be_between` for predicted classes/scores.
 
-5.  **Additional Guidelines**:
-    * Handle ambiguous or incomplete backlog items by making reasonable assumptions based on the Home Credit dataset (e.g., common columns like SK_ID_CURR, AMT_CREDIT, AMT_INCOME_TOTAL).
-    * Ensure column names (e.g., AMT_CREDIT) and table names (e.g., bureau) are accurately identified and preserved in their exact form.
-    * If multiple operations are combined in a single sentence, split them into distinct steps or rules for clarity.
-    * Exclude any explanatory text, comments, or non-JSON content from the output.
-    * Return a valid JSON object.
+5.  **Global Data Quality Checks (New Section)**:
+    * Use `global_data_quality_checks` (optional list of `DataQualityCheck` objects) for overall dataset checks (e.g., `expect_table_row_count_to_be_between` on the final output).
+
+**General Guidelines for LLM Generation:**
+* **Infer everything:** If a detail isn't explicitly mentioned, infer it based on common data engineering practices and the Home Credit dataset context.
+* **Be specific:** For `expectation_type` and `operation` fields, use precise terms.
+* **Valid JSON:** Ensure the entire output is a syntactically correct JSON object.
+* **No extraneous text:** Only output the JSON.
+
 Backlog item:
 {backlog_item}
 """,
@@ -171,52 +244,88 @@ def parse_backlog_item(backlog_item: str) -> dict | str:
     try:
         parsed_output = backlog_chain.invoke({"backlog_item": backlog_item})
 
-        columns_to_validate = []
-        # Access the 'details' key of each dictionary
-        for item in parsed_output["transformation"]:
-            # Ensure 'details' key exists before accessing
-            if "details" in item and isinstance(item["details"], str):
-                matches = re.findall(r"\b[A-Z_]+\b", item["details"])
-                columns_to_validate.extend(matches)
-            else:
-                # Handle cases where 'details' might be missing or not a string
-                # You might log this or raise a more specific error
-                print(
-                    f"Warning: 'details' key missing or not a string in transformation item: {item}"
-                )
+        all_mentioned_columns = set()  # Use a set to store all unique columns mentioned
+        generated_columns = set()  # New set to store columns expected to be generated
 
-        for item in parsed_output["business_rules"]:
-            # Ensure 'details' key exists before accessing
-            if "details" in item and isinstance(item["details"], str):
-                matches = re.findall(r"\b[A-Z_]+\b", item["details"])
-                columns_to_validate.extend(matches)
-            else:
-                print(
-                    f"Warning: 'details' key missing or not a string in business rule item: {item}"
-                )
+        # Helper function to extract columns from details string
+        def extract_columns_from_text(text: str) -> List[str]:
+            # This regex is simple and might catch non-column words.
+            # A more robust solution might involve a lexicon of common column names
+            # from the Home Credit dataset or a more sophisticated NLP model.
+            return re.findall(r"\b[A-Z_]+\b", text)
 
-        # The rest of your code remains the same, but now accessing dictionary keys for 'source'
-        for source_item in parsed_output["source"]:
-            # Ensure 'name' key exists before accessing
+        # --- Collect all mentioned columns and identify generated ones ---
+
+        # 1. From Transformation Steps
+        for item in parsed_output.get("transformation", []):
+            if "details" in item and isinstance(item["details"], str):
+                all_mentioned_columns.update(extract_columns_from_text(item["details"]))
+            if item.get("transformations_details"):
+                for op_detail in item["transformations_details"]:
+                    if op_detail.get("columns"):
+                        all_mentioned_columns.update(op_detail["columns"])
+            if item.get("data_quality_checks"):
+                for dq_check in item["data_quality_checks"]:
+                    if dq_check.get("column"):
+                        all_mentioned_columns.add(dq_check["column"])
+
+        # 2. From Business Rules
+        for item in parsed_output.get("business_rules", []):
+            if "details" in item and isinstance(item["details"], str):
+                all_mentioned_columns.update(extract_columns_from_text(item["details"]))
+            # You might expand this section if business rules explicitly define new calculated columns
+            # For example: if item.get("type") == "calculation" and "new_column" in item.get("details"):
+            #    generated_columns.add("new_column")
+
+        # 3. From Output Requirements (Crucial for identifying generated columns like LOAN_REPAYMENT_SCORE)
+        for item in parsed_output.get("output", []):
+            if "details" in item and isinstance(item["details"], str):
+                all_mentioned_columns.update(extract_columns_from_text(item["details"]))
+            if item.get("data_quality_checks"):
+                for dq_check in item["data_quality_checks"]:
+                    if dq_check.get("column"):
+                        all_mentioned_columns.add(dq_check["column"])
+                        # If this output step involves a scoring model, its output column is generated
+                        if item.get("type") == "scoring_model":
+                            generated_columns.add(
+                                dq_check["column"]
+                            )  # Mark as generated!
+
+        # 4. From Global Data Quality Checks
+        if parsed_output.get("global_data_quality_checks"):
+            for dq_check in parsed_output["global_data_quality_checks"]:
+                if dq_check.get("column"):
+                    all_mentioned_columns.add(dq_check["column"])
+                    # Global checks might also apply to generated columns,
+                    # but typically they are overall checks on the final output,
+                    # so if the column was already marked as generated above, it stays.
+
+        # --- Validate Source Files exist ---
+        source_tables = []
+        for source_item in parsed_output.get("source", []):
             if "name" in source_item and isinstance(source_item["name"], str):
                 file_path = f"data/raw/{source_item['name']}.csv"
                 if not os.path.exists(file_path):
                     return f"File {source_item['name']}.csv not found"
+                source_tables.append(source_item["name"])
             else:
                 print(
                     f"Warning: 'name' key missing or not a string in source item: {source_item}"
                 )
-                # Decide how to handle invalid source entries, e.g., skip or raise error
 
-        for column in set(columns_to_validate):
-            column_valid = False
-            for source_item in parsed_output["source"]:
-                if "name" in source_item and isinstance(source_item["name"], str):
-                    validation_result = validate_schema(source_item["name"], column)
-                    if validation_result["valid"]:
-                        column_valid = True
-                        break
-            if not column_valid:
+        # --- Validate Columns against Source Tables (excluding generated ones) ---
+
+        # Columns that MUST be found in source tables are all mentioned columns MINUS generated ones.
+        columns_for_source_validation = all_mentioned_columns - generated_columns
+
+        for column in columns_for_source_validation:
+            column_found_in_any_source = False
+            for source_table_name in source_tables:
+                validation_result = validate_schema(source_table_name, column)
+                if validation_result["valid"]:
+                    column_found_in_any_source = True
+                    break
+            if not column_found_in_any_source:
                 return f"Column {column} not found in any source table"
 
         return parsed_output

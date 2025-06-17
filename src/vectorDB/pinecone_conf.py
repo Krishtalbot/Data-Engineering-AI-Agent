@@ -71,7 +71,7 @@ class PineconeManager:
             self._load_model()
         return self._model
 
-    def chunk_text(self, text: str, chunk_size: int = 200) -> List[str]:
+    def chunk_text(self, text: str, chunk_size: int = 500) -> List[str]:
         words = text.split()
         return [
             " ".join(words[i : i + chunk_size])

@@ -63,39 +63,74 @@ def generate_etl_code(parsed_backlog_dict: dict, original_backlog_item_str: str)
 
     system_message_coder = """
     You are a Spark code generator who writes PySpark code. You will write
-    clean, efficient PySpark code from a JSON that you will receive. In the JSON you will
-    get sources, transformation and business rules. You will analyze them
-    all and write a fully functioning PySpark code.
+    clean, efficient PySpark code from a JSON specification that you will receive. The JSON
+    will contain detailed information about sources, transformations (including granular operations and
+    data quality checks), business rules, and output requirements (including model scoring and
+    post-scoring data quality checks).
 
     Your code should:
-    1. Import necessary libraries
-    2. Set up a Spark session
-    3. Read the source data files from "data/raw/{source}.csv"
-    4. Apply all transformations from the JSON
-    5. Implement all business rules from the JSON
-    6. Write the output data according to the output specifications
-    7. Include appropriate comments explaining each section
+    1.  **Import necessary libraries**: Include `pyspark.sql`, `pyspark.sql.functions`, `great_expectations`, and `great_expectations.dataset.sparkdf_dataset`.
+    2.  **Set up a Spark session**: Create a SparkSession.
+    3.  **Read source data**: Read each source data file from "data/raw/{source_name}.csv" into a PySpark DataFrame.
+    4.  **Initialize Great Expectations**:
+        * Get a Great Expectations Data Context (use `gx.get_context()`).
+        * For each section with `data_quality_checks` (e.g., post-join, post-cleaning, post-scoring, global):
+            * Create a unique `ExpectationSuite` name (e.g., `f"{dataframe_name}_suite"`).
+            * Create the `ExpectationSuite` using `context.create_expectation_suite()`.
+            * Iterate through the `data_quality_checks` list. For each check, add the corresponding expectation to the suite using `suite.add_expectation(gx.expectations.Expect...())`. Use the provided `expectation_type` and `kwargs`.
+            * Save the expectation suite using `context.save_expectation_suite()`.
+    5.  **Apply Transformations**:
+        * Implement each transformation step in the order they appear.
+        * For `join` transformations, use `df_source.join(df_other, on=join_key, how=join_type)`. Use the `output_table_name` for the new DataFrame variable name.
+        * For `column_manipulation`, iterate through `transformations_details` and apply specific PySpark operations (e.g., `.fillna()`, `.withColumn()`, `.cast()`).
+        * **Crucially, after each transformation step that has `data_quality_checks` defined:**
+            * Convert the current PySpark DataFrame to a Great Expectations `SparkDFDataset` (e.g., `ge_df = SparkDFDataset(current_df)`).
+            * Load the relevant `ExpectationSuite` (using the suite name you created).
+            * Run validation: `validation_results = ge_df.validate(expectation_suite=your_suite)`.
+            * **Implement Error Handling for GE**:
+                * Check `validation_results["success"]`.
+                * If `False`:
+                    * Print a clear message indicating which check failed.
+                    * Iterate through `validation_results["results"]` to log specific failures (`expectation_config`, `result`).
+                    * If `severity` is "CRITICAL", raise an `Exception` to halt the pipeline (`raise Exception("Critical data quality check failed.")`).
+                    * If `severity` is "WARNING", just log the issue (do not halt).
+                * Always call `context.build_data_docs()` after validation to generate reports.
+    6.  **Implement Business Rules**: Apply filters, aggregations, or derive new columns based on the business rules.
+    7.  **Apply AutoML Scoring Model**:
+        * When `output.type` is "scoring_model", include a placeholder for applying the model. Since the model itself is external, assume it's a function or a loaded Spark MLlib pipeline.
+        * Example Placeholder: `scored_df = your_automl_model_function(transformed_df) # Replace with actual model application`
+        * Add columns for `LOAN_REPAYMENT_SCORE` and any metadata (e.g., `confidence_score` if the model provides it).
+        * Apply `data_quality_checks` to the `scored_df` similarly to transformations, with appropriate error handling.
+    8.  **Apply Global Data Quality Checks**: If `global_data_quality_checks` are present, apply them to the final output DataFrame before writing.
+    9.  **Write Output Data**: Write the final DataFrame (e.g., `scored_applicants_df`) to a specified location (e.g., Parquet file) as per the output format.
+
+    **Code Structure and Best Practices:**
+    * Use clear variable names for DataFrames (e.g., `application_train_df`, `bureau_df`, `joined_df`, `cleaned_df`, `scored_df`).
+    * Add appropriate comments explaining each section, transformation, and data quality check.
+    * Ensure the code is syntactically correct and executable.
 
     IMPORTANT: After you've generated the code, respond with "FINISH" at the end of your message.
-    The next agent will optimize this code. Make sure the code is syntactically correct.
+    The next agent will optimize this code.
     """
 
     system_message_optimizer = """
     You are a senior data engineer specializing in PySpark optimization. You will receive PySpark code that has been
-    auto-generated based on a set of sources, transformations, and business rules.
+    auto-generated based on a set of sources, transformations, business rules, **Great Expectations data quality checks**,
+    and **AutoML model application**.
 
     Your job is to review and improve the code for:
-    1. Performance (e.g., use of caching, partitioning, avoiding shuffles)
-    2. Readability and structure (e.g., modular functions, clean formatting)
-    3. Spark best practices (e.g., limiting wide transformations, efficient joins, correct data types)
-    4. Error handling (e.g., try-except blocks for file reads/writes)
-    5. Scalability (e.g., repartitioning before large joins, using broadcast joins appropriately)
+    1.  **Performance**: Optimize Spark operations (e.g., efficient joins - consider broadcast joins if appropriate, repartitioning, caching DataFrames before multiple uses or before expensive validation steps).
+    2.  **Readability and Structure**: Refactor into modular functions for clarity, ensure clean formatting, and consistent variable naming.
+    3.  **Spark Best Practices**: Ensure correct usage of Spark APIs, avoid common pitfalls (e.g., unnecessary shuffles, excessive data collection to driver), and manage data types effectively.
+    4.  **Error Handling**: Review and enhance existing `try-except` blocks, especially around file I/O and Great Expectations validation.
+    5.  **Scalability**: Ensure the pipeline is designed to handle large datasets gracefully.
+    6.  **Great Expectations & AutoML Integration**: Ensure that the GE validation steps are correctly integrated, optimized (e.g., validation on cached DataFrames), and that the AutoML model application placeholder is robust. Do NOT alter the logic of the GE expectations themselves, only their execution context.
 
     You should:
-    - Refactor the code where needed, not just suggest improvements.
-    - Keep functionality exactly the same unless there's a bug.
-    - Improve comments but keep it short.
-    - Ensure the code remains executable and logically correct.
+    -   Refactor the code where needed, not just suggest improvements.
+    -   Maintain exact functionality, only correcting bugs or enhancing performance/readability.
+    -   Improve comments to be concise and informative.
+    -   Ensure the optimized code remains executable and logically correct, including all GE validation and AutoML model application steps.
 
     At the end of your response, include a summary of the key improvements made, followed by the keyword "FINISH".
     """
@@ -181,8 +216,11 @@ def save_code_to_file(code, filename):
 def main():
     if len(sys.argv) < 2:
         backlog_item_str = """
-        Generate an ETL pipeline to predict loan default on the main application table,
-        joining with previous credit bureau data and ensuring all missing values are handled.
+        Generate an ETL pipeline to predict loan default. 
+        Use application_train and bureau tables. Join them on SK_ID_CURR. 
+        Handle all missing values, then apply our loan default scoring model (scores 0-100).
+        Ensure the final score is never null and is between 0 and 100. 
+        Also, check that the joined data has unique SK_ID_CURR after joining.
         """
         print(f"Using test backlog item: {backlog_item_str}")
 
