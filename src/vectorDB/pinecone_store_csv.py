@@ -26,15 +26,12 @@ def process_csv_and_store(csv_file_path: str, index_manager: PineconeManager):
         return
 
     try:
-        # --- IMPORTANT CHANGE HERE: Added encoding='latin1' ---
-        # This helps resolve UnicodeDecodeError by specifying the file's encoding.
         df = pd.read_csv(csv_file_path, encoding="latin1")
         logging.info(
             f"Successfully loaded CSV file: {csv_file_path} with encoding 'latin1'."
         )
         logging.info(f"CSV columns found: {df.columns.tolist()}")
 
-        # Define the expected columns in your CSV file
         required_columns = ["Table", "Row", "Description"]
         if not all(col in df.columns for col in required_columns):
             logging.error(
@@ -46,34 +43,57 @@ def process_csv_and_store(csv_file_path: str, index_manager: PineconeManager):
             f"Starting to process {len(df)} rows and store in Pinecone index '{index_manager.index_name}'..."
         )
         for idx, row in df.iterrows():
-            table_name = str(row["Table"])
+            table_name_raw = str(row["Table"])
             column_name = str(row["Row"])
             description = str(row["Description"])
 
-            # Combine relevant information into a single text string for embedding
-            text_to_embed = f"Table: {table_name}, Column: {column_name}, Description: {description}"
-
-            # Store additional metadata for filtering or display during retrieval
-            metadata = {
-                "table": table_name,
-                "column": column_name,
-                "original_description": description,  # Keep the full description
-            }
-
-            # Create a DataInput object
-            data_input = DataInput(text=text_to_embed, metadata=metadata)
-
-            # Use the store_data method from the PineconeManager instance
-            response = index_manager.store_data(data_input)
-
-            if response:
-                logging.info(
-                    f"Row {idx + 1}: Stored '{column_name}' from table '{table_name}'. Chunks: {response.get('chunks')}"
-                )
+            # --- MODIFICATION START ---
+            # Handle the dynamic table name "application_{train|test}.csv"
+            # If the raw table name contains "{train|test}", create entries for both train and test.
+            if "{train|test}" in table_name_raw:
+                # Create a list of actual table names to process
+                actual_table_names = [
+                    table_name_raw.replace("{train|test}", "train"),
+                    table_name_raw.replace("{train|test}", "test"),
+                ]
             else:
-                logging.warning(
-                    f"Row {idx + 1}: Failed to store '{column_name}' from table '{table_name}'."
-                )
+                # If no placeholder, just use the table_name_raw as is
+                actual_table_names = [table_name_raw]
+
+            # Iterate over the determined actual table names
+            for current_table_name in actual_table_names:
+                # Append '.csv' to the table name if it's not already there, for consistency
+                # Assuming your raw data files are named like 'application_train.csv'
+                if not current_table_name.endswith(".csv"):
+                    current_table_name += ".csv"
+
+                # Combine relevant information into a single text string for embedding
+                # This text will be embedded and used for semantic search
+                text_to_embed = f"Table: {current_table_name}, Column: {column_name}, Description: {description}"
+
+                # Store additional metadata for filtering or display during retrieval
+                # The 'table' field here will contain the specific table name (e.g., 'application_train.csv')
+                metadata = {
+                    "table": current_table_name,
+                    "column": column_name,
+                    "original_description": description,  # Keep the full description
+                }
+
+                # Create a DataInput object
+                data_input = DataInput(text=text_to_embed, metadata=metadata)
+
+                # Use the store_data method from the PineconeManager instance
+                response = index_manager.store_data(data_input)
+
+                if response:
+                    logging.info(
+                        f"Row {idx + 1}: Stored '{column_name}' from table '{current_table_name}'. Chunks: {response.get('chunks')}"
+                    )
+                else:
+                    logging.warning(
+                        f"Row {idx + 1}: Failed to store '{column_name}' from table '{current_table_name}'."
+                    )
+            # --- MODIFICATION END ---
 
         logging.info("Finished processing and storing all data from CSV.")
 
@@ -82,7 +102,6 @@ def process_csv_and_store(csv_file_path: str, index_manager: PineconeManager):
     except pd.errors.ParserError as e:
         logging.error(f"Error parsing CSV file '{csv_file_path}': {e}")
     except UnicodeDecodeError as e:
-        # Provide a more specific error message for encoding issues
         logging.error(
             f"UnicodeDecodeError: Failed to decode CSV file with 'latin1' encoding. "
             f"It might be encoded differently. Original error: {e}"
@@ -97,10 +116,8 @@ def process_csv_and_store(csv_file_path: str, index_manager: PineconeManager):
 
 
 if __name__ == "__main__":
-    # Updated CSV file path as per your request
     csv_file_path = "data/raw/HomeCredit_columns_description.csv"
 
-    # --- Step 1: Get the desired index name from the user ---
     new_index_name = input(
         "Enter the name of the Pinecone index you want to use (e.g., 'home-credit-columns-data'): "
     ).strip()
@@ -108,8 +125,6 @@ if __name__ == "__main__":
         print("Index name cannot be empty. Exiting.")
         exit(1)
 
-    # --- Step 2: Ensure the specified Pinecone index exists ---
-    # This calls the utility from pinecone_index.py to create the index if it doesn't exist.
     print(f"\nEnsuring Pinecone index '{new_index_name}' exists or creating it...")
     try:
         ensure_pinecone_index(new_index_name)
@@ -119,10 +134,8 @@ if __name__ == "__main__":
         )
         exit(1)
 
-    # --- Step 3: Initialize the PineconeManager for the specified index ---
     print(f"\nInitializing PineconeManager for index: '{new_index_name}'...")
     try:
-        # Pass the desired index name to the manager
         manager = PineconeManager(new_index_name)
     except Exception as e:
         print(f"Error initializing PineconeManager: {e}.")
@@ -131,15 +144,13 @@ if __name__ == "__main__":
         )
         exit(1)
 
-    # --- Step 4: Process the CSV and store data using the manager ---
     print(
         f"\nStarting to process '{csv_file_path}' and store data in Pinecone index '{new_index_name}'..."
     )
-    process_csv_and_store(csv_file_path, manager)  # Pass the manager instance
+    process_csv_and_store(csv_file_path, manager)
 
     print(f"\nData storage process complete for index '{new_index_name}'.")
 
-    # --- Step 5: Optional: Allow user to test search on the new index ---
     print("\n--- Test Search Functionality ---")
     while True:
         query = input(
@@ -153,13 +164,11 @@ if __name__ == "__main__":
 
         print(f"Searching for: '{query}' in index '{new_index_name}'...")
         try:
-            # Use the search_similar_prompt method from the PineconeManager instance
             results = manager.search_similar_prompt(query)
             if results and results.matches:
                 print("\nFound similar descriptions:")
                 for match in results.matches:
                     score = match.score
-                    # Extract metadata, providing defaults for robustness
                     original_desc = match.metadata.get("original_description", "N/A")
                     table = match.metadata.get("table", "N/A")
                     column = match.metadata.get("column", "N/A")

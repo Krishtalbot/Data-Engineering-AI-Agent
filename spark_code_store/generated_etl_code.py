@@ -1,171 +1,202 @@
-import pyspark.sql
+import sys
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
-from pyspark.sql.types import *
+from pyspark.sql.functions import col, mean, lit, mode
+from pyspark.sql.types import DoubleType
 import great_expectations as gx
-from great_expectations.dataset.sparkdf_dataset import SparkDFDataset
+from great_expectations.dataset import SparkDFDataset
 
-# Constants
-APPLICATION_TRAIN_PATH = "data/raw/application_train.csv"
-BUREAU_PATH = "data/raw/bureau.csv"
-OUTPUT_PATH = "data/output/loan_default_predictions.parquet"
-JOIN_KEY = "SK_ID_CURR"
-JOIN_TYPE = "inner"
 
-def initialize_spark_session(app_name="LoanDefaultPrediction"):
-    """Initializes and returns a Spark session."""
-    return SparkSession.builder.appName(app_name).getOrCreate()
+def read_data(spark, file_path, file_name):
+    """Reads a CSV file into a Spark DataFrame.
 
-def initialize_gx_context():
-    """Initializes and returns a Great Expectations context."""
-    return gx.get_context()
+    Args:
+        spark (SparkSession): The SparkSession.
+        file_path (str): The path to the CSV file.
+        file_name (str): name of the csv file for logging purposes
 
-def read_data(spark, path):
-    """Reads a CSV file into a Spark DataFrame."""
+    Returns:
+        DataFrame: The Spark DataFrame.
+    """
     try:
-        df = spark.read.csv(path, header=True, inferSchema=True)
+        df = spark.read.csv(file_path, header=True, inferSchema=True)
+        print(f"Successfully read data from {file_name}: {file_path}")
         return df
     except Exception as e:
-        raise Exception(f"Error reading data from {path}: {e}")
+        print(f"Error reading {file_name} file: {e}")
+        sys.exit(1)
 
-def perform_join(application_train_df, bureau_df, join_key, join_type):
-    """Performs a join operation between two DataFrames."""
-    # Attempt a broadcast join if bureau_df is small enough
-    if bureau_df.count() < 10000:  # Adjust threshold as needed
-        joined_df = application_train_df.join(F.broadcast(bureau_df), on=join_key, how=join_type)
-    else:
-        joined_df = application_train_df.join(bureau_df, on=join_key, how=join_type)
-    return joined_df
 
-def define_and_validate_expectation_suite(context, suite_name, df, expectations):
-    """Defines and validates a Great Expectations suite."""
+def create_great_expectations_suite(context, suite_name, expectations):
+    """Creates a Great Expectations suite and adds the specified expectations.
+
+    Args:
+        context (DataContext): The Great Expectations DataContext.
+        suite_name (str): The name of the expectation suite.
+        expectations (list): A list of Great Expectations expectation objects.
+    """
     try:
-        suite = context.get_expectation_suite(suite_name)
-        print(f"Loaded ExpectationSuite `{suite.name}` containing {len(suite.expectations)} expectations.")
-    except gx.exceptions.DataContextError:
-        suite = context.create_expectation_suite(suite_name)
+        suite = context.create_expectation_suite(expectation_suite_name=suite_name, overwrite_existing=True)
+        for expectation in expectations:
+            suite.add_expectation(expectation)
+        context.save_expectation_suite(suite)
+        print(f"Successfully created and saved Great Expectations suite: {suite_name}")
+    except Exception as e:
+        print(f"Error creating Great Expectations suite {suite_name}: {e}")
+        sys.exit(1)
 
-    for check in expectations:
-        expectation_type = check["expectation_type"]
-        column = check.get("column")
-        kwargs = check.get("kwargs", {})
 
-        if expectation_type == "expect_column_values_to_not_be_null":
-            suite.add_expectation(gx.expectations.ExpectColumnValuesToBePresent(column=column))
-        elif expectation_type == "expect_column_pair_values_to_be_unique":
-            suite.add_expectation(gx.expectations.ExpectColumnPairValuesToBeUnique(column_A=column, column_B=column, ignore_row_if=kwargs.get("ignore_row_if", "any")))
-        elif expectation_type == "expect_column_values_to_be_of_type":
-            suite.add_expectation(gx.expectations.ExpectColumnValuesToBeOfType(column=column, type_=kwargs["type"]))
-        elif expectation_type == "expect_column_values_to_be_between":
-            suite.add_expectation(gx.expectations.ExpectColumnValuesToBeBetween(column=column, min_value=kwargs["min_value"], max_value=kwargs["max_value"]))
-        else:
-            raise ValueError(f"Unsupported expectation type: {expectation_type}")
+def validate_data(context, df, suite_name, df_name):
+    """Validates a Spark DataFrame against a Great Expectations suite.
 
-    context.save_expectation_suite(suite)
-    ge_df = SparkDFDataset(df)
-    validation_results = ge_df.validate(expectation_suite=suite)
+    Args:
+        context (DataContext): The Great Expectations DataContext.
+        df (DataFrame): The Spark DataFrame to validate.
+        suite_name (str): The name of the expectation suite.
+        df_name (str): The name of the dataframe for logging purposes.
+    """
+    try:
+        ge_df = SparkDFDataset(df)
+        validation_results = ge_df.validate(expectation_suite_name=suite_name)
 
-    if not validation_results["success"]:
-        print(f"Data quality checks failed for {suite_name}!")
-        for result in validation_results["results"]:
-            if not result["success"]:
-                print(f"  Failure: {result['expectation_config']['expectation_type']}")
-                print(f"    - Column: {result['expectation_config'].get('kwargs', {}).get('column')}")
-                print(f"    - Details: {result['result']}")
-                severity = next((check["severity"] for check in expectations if check["expectation_type"] == result['expectation_config']['expectation_type']), None)
-                if severity == "CRITICAL":
-                    raise Exception(f"Critical data quality check failed for {suite_name}.")
-                elif severity == "WARNING":
-                    print("Warning: Data quality issue detected.")
-    context.build_data_docs()
+        if not validation_results["success"]:
+            print(f"Data quality checks failed for {df_name}!")
+            for result in validation_results["results"]:
+                if not result["success"]:
+                    print(f"  Expectation: {result['expectation_config']['expectation_type']}")
+                    print(f"  Column: {result['expectation_config']['kwargs'].get('column', 'N/A')}")
+                    print(f"  Result: {result['result']}")
+                    if result['expectation_config'].get('severity', 'WARNING') == "CRITICAL":
+                        raise Exception(f"Critical data quality check failed for {df_name}.")
+
+        context.build_data_docs()
+        print(f"Successfully validated data against Great Expectations suite: {suite_name}")
+
+    except Exception as e:
+        print(f"Error during data quality checks for {df_name}: {e}")
+        sys.exit(1)
+
 
 def handle_missing_values(df):
-    """Imputes missing values in numeric columns with the mean and categorical columns with the mode."""
-    cleaned_data = df
-    # Impute numeric columns with mean
-    for col in cleaned_data.columns:
-        if isinstance(cleaned_data.schema[col].dataType, (IntegerType, DoubleType, FloatType)):
-            mean_val = cleaned_data.select(F.mean(col)).first()[0]
-            if mean_val is not None:
-                cleaned_data = cleaned_data.fillna({col: mean_val})
+    """Handles missing values in a Spark DataFrame by imputing with mean (numeric) or mode (string).
 
-    # Impute categorical columns with mode
-    for col in cleaned_data.columns:
-        if not isinstance(cleaned_data.schema[col].dataType, (IntegerType, DoubleType, FloatType)):
-            mode_val = cleaned_data.groupBy(col).count().orderBy(F.desc("count")).first()[col]
-            if mode_val is not None:
-                cleaned_data = cleaned_data.fillna({col: mode_val})
+    Args:
+        df (DataFrame): The input Spark DataFrame.
+
+    Returns:
+        DataFrame: The DataFrame with missing values imputed.
+    """
+    cleaned_data = df
+    # Impute missing numeric values with column mean.
+    for col_name in cleaned_data.columns:
+        if cleaned_data.schema[cleaned_data.columns.index(col_name)].dataType == DoubleType():  # check if column is of DoubleType
+            mean_value = cleaned_data.agg(mean(col(col_name))).collect()[0][0]
+            if mean_value is not None:  # handles the case where the whole column is null
+                cleaned_data = cleaned_data.fillna(mean_value, subset=[col_name])
+
+    # Impute missing categorical values with column mode.
+    for col_name in cleaned_data.columns:
+        if cleaned_data.schema[cleaned_data.columns.index(col_name)].dataType.typeName() == 'string':  # check if column is of StringType
+            mode_value = cleaned_data.groupBy(col_name).count().orderBy(col("count"), ascending=False).first()[col_name]
+            if mode_value is not None:  # handles the case where the whole column is null
+                cleaned_data = cleaned_data.fillna(mode_value, subset=[col_name])
+
     return cleaned_data
 
-def apply_loan_scoring_model(df):
-    """Applies a placeholder loan scoring model. Replace with actual model application."""
-    scored_data = df.withColumn("LOAN_REPAYMENT_SCORE", F.lit(None).cast(DoubleType()))
-    return scored_data
-
-def write_output(df, path):
-    """Writes the DataFrame to a Parquet file."""
-    try:
-        df.write.parquet(path, mode="overwrite")
-        print(f"Data written to {path}")
-    except Exception as e:
-        raise Exception(f"Error writing data to {path}: {e}")
 
 def main():
-    """Main function to execute the loan default prediction pipeline."""
+    """Main ETL function for loan scoring."""
     # Initialize Spark session
-    spark = initialize_spark_session()
+    spark = SparkSession.builder.appName("LoanScoringETL").getOrCreate()
 
-    # Initialize Great Expectations context
-    context = initialize_gx_context()
+    # Source data filenames
+    application_train_file = "data/raw/application_train.csv"
+    bureau_file = "data/raw/bureau.csv"
+
+    # Output file
+    output_file = "data/output/loan_scores.parquet"
 
     # Read source data
-    application_train_df = read_data(spark, APPLICATION_TRAIN_PATH)
-    bureau_df = read_data(spark, BUREAU_PATH)
+    application_train_df = read_data(spark, application_train_file, "application_train")
+    bureau_df = read_data(spark, bureau_file, "bureau")
 
-    # Join tables
-    joined_df = perform_join(application_train_df, bureau_df, JOIN_KEY, JOIN_TYPE)
+    # Initialize Great Expectations context
+    context = gx.get_context()
 
-    # Cache the joined DataFrame before validation and cleaning
-    joined_df = joined_df.cache()
+    # Transformation: Join application_train and bureau tables
+    join_key = "SK_ID_CURR"
+    join_type = "inner"  # or "left", "right", etc.
+    joined_df = application_train_df.join(bureau_df, on=join_key, how=join_type)
+    joined_df.cache()  # Cache the joined DataFrame as it will be used for validation and further processing
 
     # Data Quality Checks - Post Join
-    data_quality_checks_joined = [
-        {"expectation_type": "expect_column_values_to_not_be_null", "column": "SK_ID_CURR", "severity": "CRITICAL", "description": "Ensure no null values in join key after join."},
-        {"expectation_type": "expect_column_pair_values_to_be_unique", "column": "SK_ID_CURR", "kwargs": {"ignore_row_if": "any_value_is_missing"}, "severity": "CRITICAL", "description": "Ensure SK_ID_CURR is unique after the join."}
-    ]
-    define_and_validate_expectation_suite(context, "joined_df_suite", joined_df, data_quality_checks_joined)
+    joined_df_suite_name = "joined_df_suite"
+    create_great_expectations_suite(
+        context,
+        joined_df_suite_name,
+        [
+            gx.expectations.ExpectColumnValuesToBePresent(column=join_key),
+            gx.expectations.ExpectColumnValuesToBeUnique(
+                column=join_key, ignore_row_if="any_value_is_missing"
+            ),
+        ],
+    )
+    validate_data(context, joined_df, joined_df_suite_name, "joined_df")
 
-    # Handle missing values
+    # Transformation: Handle missing values
     cleaned_data = handle_missing_values(joined_df)
-
-    # Cache the cleaned DataFrame before validation and scoring
-    cleaned_data = cleaned_data.cache()
+    cleaned_data.cache()  # Cache the cleaned DataFrame
 
     # Data Quality Checks - Post Cleaning
-    data_quality_checks_cleaned = [
-        {"expectation_type": "expect_column_values_to_not_be_null", "column": "AMT_INCOME_TOTAL", "severity": "WARNING", "description": "Check for remaining nulls in AMT_INCOME_TOTAL after imputation."},
-        {"expectation_type": "expect_column_values_to_be_of_type", "column": "AMT_INCOME_TOTAL", "kwargs": {"type": "numeric"}, "severity": "WARNING", "description": "Ensure AMT_INCOME_TOTAL is numeric after imputation."}
-    ]
-    define_and_validate_expectation_suite(context, "cleaned_data_suite", cleaned_data, data_quality_checks_cleaned)
+    cleaned_data_suite_name = "cleaned_data_suite"
+    create_great_expectations_suite(
+        context,
+        cleaned_data_suite_name,
+        [
+            gx.expectations.ExpectColumnValuesToBePresent(column="AMT_INCOME_TOTAL"),
+            gx.expectations.ExpectColumnValuesToBeOfType(column="AMT_INCOME_TOTAL", type_="numeric"),
+        ],
+    )
+    validate_data(context, cleaned_data, cleaned_data_suite_name, "cleaned_data")
 
-    # Apply loan default scoring model
-    scored_data = apply_loan_scoring_model(cleaned_data)
+    # Transformation: Apply loan default scoring model
+    scored_data = cleaned_data  # placeholder
+    # Assume 'your_automl_model_function' takes a Spark DataFrame and returns a DataFrame with a 'LOAN_REPAYMENT_SCORE' column.
+    # scored_data = your_automl_model_function(cleaned_data)
 
-    # Cache the scored DataFrame before validation and writing
-    scored_data = scored_data.cache()
+    # Placeholder for adding LOAN_REPAYMENT_SCORE
+    scored_data = scored_data.withColumn("LOAN_REPAYMENT_SCORE", lit(50).cast("integer"))
+    scored_data.cache()
 
-    # Output: Apply data quality checks and write output
-    data_quality_checks_scoring = [
-        {"expectation_type": "expect_column_values_to_not_be_null", "column": "LOAN_REPAYMENT_SCORE", "severity": "CRITICAL", "description": "Ensure the final score is never null."},
-        {"expectation_type": "expect_column_values_to_be_between", "column": "LOAN_REPAYMENT_SCORE", "kwargs": {"min_value": 0, "max_value": 100}, "severity": "CRITICAL", "description": "Ensure the final score is between 0 and 100."},
-        {"expectation_type": "expect_column_values_to_be_of_type", "column": "LOAN_REPAYMENT_SCORE", "kwargs": {"type": "numeric"}, "severity": "CRITICAL", "description": "Ensure the final score is numeric."}
-    ]
-    define_and_validate_expectation_suite(context, "loan_default_predictions_suite", scored_data, data_quality_checks_scoring)
+    # Output: Apply scoring model and generate final output
+    final_output = scored_data
+    final_output_suite_name = "final_output_suite"
 
-    # Write the final DataFrame to a Parquet file
-    write_output(scored_data, OUTPUT_PATH)
+    create_great_expectations_suite(
+        context,
+        final_output_suite_name,
+        [
+            gx.expectations.ExpectColumnValuesToBePresent(column="LOAN_REPAYMENT_SCORE"),
+            gx.expectations.ExpectColumnValuesToBeBetween(column="LOAN_REPAYMENT_SCORE", min_value=0, max_value=100),
+            gx.expectations.ExpectColumnValuesToBeOfType(column="LOAN_REPAYMENT_SCORE", type_="numeric"),
+        ],
+    )
 
-    # Stop the Spark session
+    validate_data(context, final_output, final_output_suite_name, "final_output")
+
+    # Global Data Quality Checks
+    global_suite_name = "global_suite"
+    create_great_expectations_suite(
+        context,
+        global_suite_name,
+        [gx.expectations.ExpectTableRowCountToBeBetween(min_value=1000, max_value=400000)],
+    )
+
+    validate_data(context, final_output, global_suite_name, "final_output_global")
+
+    # Write output data
+    final_output.write.parquet(output_file, mode="overwrite")
+
+    # Stop Spark session
     spark.stop()
 
 if __name__ == "__main__":

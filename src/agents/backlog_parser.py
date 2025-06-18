@@ -3,10 +3,18 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from pydantic.v1 import BaseModel, Field
-import pandas as pd
 from typing import List, Optional, Literal
 import os
 import re
+
+from src.vectorDB.pinecone_conf import (
+    PineconeManager,
+    DataInput,
+)  # Adjust path if needed
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 
 class Source(BaseModel):
@@ -143,19 +151,58 @@ class BacklogItem(BaseModel):
     )
 
 
+# Remove pandas import if not used elsewhere, or modify this function
 def validate_schema(table_name: str, column_name: str) -> dict:
+    if column_desc_pinecone_manager is None:
+        return {
+            "valid": False,
+            "error": "PineconeManager for column descriptions not initialized.",
+        }
+
     try:
-        file_path = f"data/raw/{table_name}.csv"
-        if not os.path.exists(file_path):
-            return {"valid": False, "error": f"File {table_name}.csv not found"}
-        df = pd.read_csv(file_path)
-        return {"valid": column_name in df.columns, "error": None}
+        # Step 1: Encode the query text to get a vector
+        # The query text can still be semantic to help guide the search,
+        # but the metadata filter will ensure precision.
+        query_text = f"description for column {column_name} in table {table_name}"
+        query_vector = column_desc_pinecone_manager.model.encode(query_text).tolist()
+
+        # Step 2: Define the metadata filter
+        # CRUCIAL: Ensure the table_name includes '.csv' if that's how it's stored in Pinecone metadata
+        # As per your latest store_column_descriptions.py, it should be like 'application_train.csv'
+        filter_condition = {
+            "table": {
+                "$eq": f"{table_name}.csv"
+            },  # Example: {"table": {"$eq": "application_train.csv"}}
+            "column": {
+                "$eq": column_name
+            },  # Example: {"column": {"$eq": "SK_ID_CURR"}}
+        }
+
+        # Step 3: Directly query the Pinecone index using the filter
+        results = column_desc_pinecone_manager.index.query(
+            vector=query_vector,
+            top_k=1,  # We only need to know if at least one exact match exists
+            include_metadata=True,  # Include metadata to confirm (optional, but good for debugging)
+            filter=filter_condition,  # THIS IS THE KEY ADDITION
+        )
+
+        if results and results.matches:
+            # If any match is returned after applying the filter, it means an exact entry was found.
+            # No need for manual `best_match.metadata.get(...) == ...` checks, as the filter already did that.
+            # You can optionally check `best_match.score` here if you want to ensure a minimum semantic relevance
+            # even for exact metadata matches, but for schema validation, the filter's match is usually sufficient.
+            return {"valid": True, "error": None}
+        else:
+            return {
+                "valid": False,
+                "error": f"Column '{column_name}' not found in table '{table_name}.csv' in Pinecone (no exact metadata match).",
+            }
     except Exception as e:
-        return {"valid": False, "error": str(e)}
+        return {
+            "valid": False,
+            "error": f"Error during Pinecone schema validation: {str(e)}",
+        }
 
-
-# Initialize LLM
-# llm = OllamaLLM(model="llama3:latest", base_url="http://localhost:11434")
 
 api_key = os.getenv("GEMINI_API_KEY")
 llm = ChatGoogleGenerativeAI(
@@ -166,6 +213,15 @@ llm = ChatGoogleGenerativeAI(
     timeout=None,
     max_retries=2,
 )
+
+column_desc_index_name = "csv-description"
+try:
+    column_desc_pinecone_manager = PineconeManager(column_desc_index_name)
+except Exception as e:
+    print(f"Failed to initialize PineconeManager for column descriptions: {e}")
+    # Decide how to handle this critical error: exit, or proceed with limited functionality
+    column_desc_pinecone_manager = None
+
 # Define prompt
 prompt = PromptTemplate(
     input_variables=["backlog_item"],
@@ -230,14 +286,9 @@ Backlog item:
 """,
 )
 
-# Create parser
 parser = JsonOutputParser(pydantic_object=BacklogItem)
 
-# Create LangChain pipeline
 backlog_chain = prompt | llm | parser
-
-
-# ... (your existing imports and Pydantic models)
 
 
 def parse_backlog_item(backlog_item: str) -> dict | str:
@@ -296,11 +347,6 @@ def parse_backlog_item(backlog_item: str) -> dict | str:
             for dq_check in parsed_output["global_data_quality_checks"]:
                 if dq_check.get("column"):
                     all_mentioned_columns.add(dq_check["column"])
-                    # Global checks might also apply to generated columns,
-                    # but typically they are overall checks on the final output,
-                    # so if the column was already marked as generated above, it stays.
-
-        # --- Validate Source Files exist ---
         source_tables = []
         for source_item in parsed_output.get("source", []):
             if "name" in source_item and isinstance(source_item["name"], str):
@@ -312,10 +358,6 @@ def parse_backlog_item(backlog_item: str) -> dict | str:
                 print(
                     f"Warning: 'name' key missing or not a string in source item: {source_item}"
                 )
-
-        # --- Validate Columns against Source Tables (excluding generated ones) ---
-
-        # Columns that MUST be found in source tables are all mentioned columns MINUS generated ones.
         columns_for_source_validation = all_mentioned_columns - generated_columns
 
         for column in columns_for_source_validation:
