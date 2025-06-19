@@ -79,6 +79,17 @@ def generate_etl_code(parsed_backlog_dict: dict, original_backlog_item_str: str)
             * Create the `ExpectationSuite` using `context.create_expectation_suite()`.
             * Iterate through the `data_quality_checks` list. For each check, add the corresponding expectation to the suite using `suite.add_expectation(gx.expectations.Expect...())`. Use the provided `expectation_type` and `kwargs`.
             * Save the expectation suite using `context.save_expectation_suite()`.
+            * Get a Great Expectations Data Context (use `gx.get_context()`).
+    * For each section with `data_quality_checks`:
+        * **Crucially, when managing Expectation Suites:**
+            * To *create or get* an Expectation Suite by name, use `suite = context.create_expectation_suite(suite_name_string)`. This method is idempotent; it will create the suite if it doesn't exist, or return the existing one.
+            * To *save* changes to an Expectation Suite (after adding expectations), use `context.save_expectation_suite(suite)`.
+
+        * Create a unique `ExpectationSuite` name (e.g., `f"{dataframe_name}_suite"`).
+        * Create or get the `ExpectationSuite` using `suite = context.create_expectation_suite(your_suite_name)`.
+        * Iterate through the `data_quality_checks` list. For each check, add the corresponding expectation to the suite using `suite.add_expectation(gx.expectations.Expect...())`. Use the provided `expectation_type` and `kwargs`.
+        * **After adding all expectations for a suite, remember to save it:** `context.save_expectation_suite(suite)`.
+
     5.  **Apply Transformations**:
         * Implement each transformation step in the order they appear.
         * For `join` transformations, use `df_source.join(df_other, on=join_key, how=join_type)`. Use the `output_table_name` for the new DataFrame variable name.
@@ -124,7 +135,9 @@ def generate_etl_code(parsed_backlog_dict: dict, original_backlog_item_str: str)
     3.  **Spark Best Practices**: Ensure correct usage of Spark APIs, avoid common pitfalls (e.g., unnecessary shuffles, excessive data collection to driver), and manage data types effectively.
     4.  **Error Handling**: Review and enhance existing `try-except` blocks, especially around file I/O and Great Expectations validation.
     5.  **Scalability**: Ensure the pipeline is designed to handle large datasets gracefully.
-    6.  **Great Expectations & AutoML Integration**: Ensure that the GE validation steps are correctly integrated, optimized (e.g., validation on cached DataFrames), and that the AutoML model application placeholder is robust. Do NOT alter the logic of the GE expectations themselves, only their execution context.
+    6. **Great Expectations & AutoML Integration**:
+    * Ensure that GE validation steps are correctly integrated, optimized (e.g., validation on cached DataFrames), and that the AutoML model application placeholder is robust.
+    * **Specifically, verify that Expectation Suites are created using `context.create_expectation_suite(suite_name)` and saved using `context.save_expectation_suite(suite_object)` after expectations are added.** Do NOT alter the logic of the GE expectations themselves, only their execution context and correct API usage.
 
     You should:
     -   Refactor the code where needed, not just suggest improvements.

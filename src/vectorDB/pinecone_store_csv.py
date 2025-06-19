@@ -1,122 +1,135 @@
 import pandas as pd
 import os
-from pinecone_conf import PineconeManager, DataInput  # Import the new PineconeManager
-from pinecone_index import ensure_pinecone_index  # Import the index creation utility
+from pinecone_conf import PineconeManager, DataInput
+from pinecone_index import ensure_pinecone_index
 from dotenv import load_dotenv
 import logging
+
+# Import the new Spark utility
+from schema_utils import get_dataframe_schema_spark, get_spark_session
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
+# Define the base directory for your actual data files
+DATA_FILES_BASE_DIR = "data/raw"
+
+# Cache for schemas to avoid re-reading large files repeatedly
+_schema_cache_spark = {}
+
 
 def process_csv_and_store(csv_file_path: str, index_manager: PineconeManager):
-    """
-    Reads a CSV file containing column descriptions, formats the data,
-    and stores it in the Pinecone index managed by the provided index_manager.
+    spark = get_spark_session()  # This initializes it if it hasn't been already
 
-    Args:
-        csv_file_path (str): The path to the CSV file.
-        index_manager (PineconeManager): An instance of PineconeManager
-                                         configured for the target index.
-    """
     if not os.path.exists(csv_file_path):
         logging.error(
-            f"Error: CSV file not found at {csv_file_path}. Please ensure it's in the correct directory."
+            f"Error: CSV description file not found at {csv_file_path}. Please ensure it's in the correct directory."
         )
         return
 
     try:
-        df = pd.read_csv(csv_file_path, encoding="latin1")
+        df_desc = pd.read_csv(csv_file_path, encoding="latin1")
         logging.info(
-            f"Successfully loaded CSV file: {csv_file_path} with encoding 'latin1'."
+            f"Successfully loaded description CSV file: {csv_file_path} with encoding 'latin1'."
         )
-        logging.info(f"CSV columns found: {df.columns.tolist()}")
+        logging.info(f"Description CSV columns found: {df_desc.columns.tolist()}")
 
         required_columns = ["Table", "Row", "Description"]
-        if not all(col in df.columns for col in required_columns):
+        if not all(col in df_desc.columns for col in required_columns):
             logging.error(
-                f"Missing one or more required columns ({required_columns}) in CSV. Found: {df.columns.tolist()}"
+                f"Missing one or more required columns ({required_columns}) in description CSV. Found: {df_desc.columns.tolist()}"
             )
             return
 
         logging.info(
-            f"Starting to process {len(df)} rows and store in Pinecone index '{index_manager.index_name}'..."
+            f"Starting to process {len(df_desc)} rows and store in Pinecone index '{index_manager.index_name}'..."
         )
-        for idx, row in df.iterrows():
+
+        for idx, row in df_desc.iterrows():
             table_name_raw = str(row["Table"])
             column_name = str(row["Row"])
             description = str(row["Description"])
 
-            # --- MODIFICATION START ---
-            # Handle the dynamic table name "application_{train|test}.csv"
-            # If the raw table name contains "{train|test}", create entries for both train and test.
+            actual_table_names = []
             if "{train|test}" in table_name_raw:
-                # Create a list of actual table names to process
-                actual_table_names = [
-                    table_name_raw.replace("{train|test}", "train"),
-                    table_name_raw.replace("{train|test}", "test"),
-                ]
+                actual_table_names.append(
+                    table_name_raw.replace("{train|test}", "train")
+                )
+                actual_table_names.append(
+                    table_name_raw.replace("{train|test}", "test")
+                )
             else:
-                # If no placeholder, just use the table_name_raw as is
-                actual_table_names = [table_name_raw]
+                actual_table_names.append(table_name_raw)
 
-            # Iterate over the determined actual table names
-            for current_table_name in actual_table_names:
-                # Append '.csv' to the table name if it's not already there, for consistency
-                # Assuming your raw data files are named like 'application_train.csv'
-                if not current_table_name.endswith(".csv"):
-                    current_table_name += ".csv"
+            for current_table_name_base in actual_table_names:
+                if not current_table_name_base.endswith(".csv"):
+                    current_table_name_base += ".csv"
 
-                # Combine relevant information into a single text string for embedding
-                # This text will be embedded and used for semantic search
-                text_to_embed = f"Table: {current_table_name}, Column: {column_name}, Description: {description}"
+                full_data_file_path = os.path.join(
+                    DATA_FILES_BASE_DIR, current_table_name_base
+                )
 
-                # Store additional metadata for filtering or display during retrieval
-                # The 'table' field here will contain the specific table name (e.g., 'application_train.csv')
+                # Get schema from cache or infer it using Spark
+                if full_data_file_path not in _schema_cache_spark:
+                    _schema_cache_spark[full_data_file_path] = (
+                        get_dataframe_schema_spark(full_data_file_path)
+                    )
+
+                column_schema = _schema_cache_spark.get(full_data_file_path, {}).get(
+                    column_name, {}
+                )
+                data_type = column_schema.get("data_type", "Unknown")
+                nullable = column_schema.get("nullable", False)
+
+                text_to_embed = (
+                    f"Table: {current_table_name_base}, Column: {column_name}, "
+                    f"Description: {description}, Data Type: {data_type}, Nullable: {nullable}"
+                )
+
                 metadata = {
-                    "table": current_table_name,
+                    "table": current_table_name_base,
                     "column": column_name,
-                    "original_description": description,  # Keep the full description
+                    "original_description": description,
+                    "data_type": data_type,
+                    "nullable": nullable,
                 }
 
-                # Create a DataInput object
                 data_input = DataInput(text=text_to_embed, metadata=metadata)
-
-                # Use the store_data method from the PineconeManager instance
                 response = index_manager.store_data(data_input)
 
                 if response:
                     logging.info(
-                        f"Row {idx + 1}: Stored '{column_name}' from table '{current_table_name}'. Chunks: {response.get('chunks')}"
+                        f"Row {idx + 1}: Stored '{column_name}' from table '{current_table_name_base}' "
+                        f"(Inferred Type: {data_type}, Nullable: {nullable}). Chunks: {response.get('chunks')}"
                     )
                 else:
                     logging.warning(
-                        f"Row {idx + 1}: Failed to store '{column_name}' from table '{current_table_name}'."
+                        f"Row {idx + 1}: Failed to store '{column_name}' from table '{current_table_name_base}'."
                     )
-            # --- MODIFICATION END ---
 
-        logging.info("Finished processing and storing all data from CSV.")
+        logging.info("Finished processing and storing all data from description CSV.")
 
     except pd.errors.EmptyDataError:
-        logging.error(f"The CSV file '{csv_file_path}' is empty.")
+        logging.error(f"The CSV description file '{csv_file_path}' is empty.")
     except pd.errors.ParserError as e:
-        logging.error(f"Error parsing CSV file '{csv_file_path}': {e}")
+        logging.error(f"Error parsing description CSV file '{csv_file_path}': {e}")
     except UnicodeDecodeError as e:
         logging.error(
-            f"UnicodeDecodeError: Failed to decode CSV file with 'latin1' encoding. "
+            f"UnicodeDecodeError: Failed to decode description CSV file with 'latin1' encoding. "
             f"It might be encoded differently. Original error: {e}"
-        )
-        logging.error(
-            "Common encodings are 'utf-8', 'latin1', or 'cp1252'. "
-            "You might need to open the CSV in a text editor (like Notepad++, VS Code) "
-            "and check its encoding, then specify it in pd.read_csv()."
         )
     except Exception as e:
         logging.error(f"An unexpected error occurred during CSV processing: {str(e)}")
+    finally:
+        # Stop SparkSession at the very end of your script or when no longer needed
+        # spark.stop() # Only uncomment this if you are absolutely sure no other parts of your app need Spark
+        pass
 
 
 if __name__ == "__main__":
     csv_file_path = "data/raw/HomeCredit_columns_description.csv"
+    # Ensure your actual data files (e.g., application_train.csv) are in 'data/raw'
+    # For testing, you might need to create dummy files as shown in Pandas example.
 
     new_index_name = input(
         "Enter the name of the Pinecone index you want to use (e.g., 'home-credit-columns-data'): "
@@ -157,6 +170,8 @@ if __name__ == "__main__":
             f"Enter a query to search for similar column descriptions in '{new_index_name}' (type 'exit' to quit): "
         ).strip()
         if query.lower() == "exit":
+            # Stop Spark Session gracefully when exiting the script
+            get_spark_session().stop()
             break
         if not query:
             print("Query cannot be empty. Please enter something to search.")
@@ -172,8 +187,10 @@ if __name__ == "__main__":
                     original_desc = match.metadata.get("original_description", "N/A")
                     table = match.metadata.get("table", "N/A")
                     column = match.metadata.get("column", "N/A")
+                    data_type = match.metadata.get("data_type", "N/A")
+                    nullable = match.metadata.get("nullable", "N/A")
                     print(
-                        f"- Score: {score:.4f} | Table: {table} | Column: {column} | Description: {original_desc}"
+                        f"- Score: {score:.4f} | Table: {table} | Column: {column} | Data Type: {data_type} | Nullable: {nullable} | Description: {original_desc}"
                     )
             else:
                 print(

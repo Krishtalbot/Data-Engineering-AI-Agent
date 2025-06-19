@@ -18,8 +18,6 @@ load_dotenv()
 
 
 class Source(BaseModel):
-    """Defines a source table or file from the Home Credit dataset."""
-
     name: str = Field(
         ..., description="Name of the source table or file (e.g., 'application_train')"
     )
@@ -36,7 +34,6 @@ class DataQualityCheck(BaseModel):
     column: Optional[str] = Field(
         None, description="The name of the column this expectation applies to."
     )
-    # Use Optional and any for flexible kwargs that match GE expectations
     kwargs: Optional[dict] = Field(
         None,
         description="Dictionary of keyword arguments for the expectation (e.g., {'min_value': 0, 'max_value': 100}).",
@@ -128,11 +125,6 @@ class OutputRequirement(BaseModel):
 
 
 class BacklogItem(BaseModel):
-    """
-    Represents a structured backlog item for data engineering tasks,
-    parsed from a complex natural language description.
-    """
-
     source: List[Source] = Field(
         description="List of source tables or files from the Home Credit dataset."
     )

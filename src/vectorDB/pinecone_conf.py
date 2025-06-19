@@ -1,6 +1,6 @@
 import os
 from pydantic import BaseModel
-from typing import Dict, List
+from typing import Dict, List, Any
 from pinecone import Pinecone, ServerlessSpec
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO)
 
 class DataInput(BaseModel):
     text: str
-    metadata: Dict[str, str] = {}
+    metadata: Dict[str, Any] = {}
 
 
 class PineconeManager:
